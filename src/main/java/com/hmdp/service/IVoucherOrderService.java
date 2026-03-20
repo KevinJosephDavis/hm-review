@@ -9,8 +9,6 @@ import com.baomidou.mybatisplus.extension.service.IService;
  *  服务类
  * </p>
  *
- * @author 虎哥
- * @since 2021-12-22
  */
 public interface IVoucherOrderService extends IService<VoucherOrder> {
 
@@ -22,5 +20,10 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
     /**
      * 创建订单
      */
-    Result createVoucherOrder(Long voucherId);
+    void createVoucherOrder(VoucherOrder voucherOrder);
+
+    /**
+     * 创建订单（旧版本）
+     */
+    Result createVoucherOrderOld(Long voucherId);
 }
