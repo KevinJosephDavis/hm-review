@@ -10,6 +10,8 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -35,6 +37,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private RedissonClient redissonClient;
 
     /**
      * 秒杀优惠券
@@ -89,12 +94,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
          */
 
         //为了解决集群下线程并发安全问题，我们手动创建锁
+        //在JVM内部有一个锁监视器，我们通过userId.toString.intern()这个在字符串常量池里的对象来标记锁的持有者
+        //而在集群模式下，有多套JVM，不同的JVM有不同的堆栈、常量池，那么就会有多个线程获取到锁，就又有并发问题了
+        //要想办法让多个JVM使用同一把锁，实现进程互斥而不仅仅是线程互斥、多进程可见（JVM外部，如MySQL、Redis），那么我们就需要使用分布式锁
 
         //创建锁对象
-        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        //SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        RLock lock = redissonClient.getLock("lock:order:" + userId);
 
         //获取锁
-        boolean isLock = lock.tryLock(1200);
+        //boolean isLock = lock.tryLock(1200);
+        //如果不传参，默认waitTime为-1，即不等待，默认释放时间为30秒
+        boolean isLock = lock.tryLock();
 
         //判断是否成功获取锁，如果没有成功，不阻塞
         if(!isLock) {
@@ -112,7 +123,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         /*
         SimpleRedisLock的问题：
-        1.误删问题：获取到锁的线程出现了业务阻塞，业务逻辑还没搞定，就触发超时释放锁
+        1.误删问题： 1   获取到锁的线程出现了业务阻塞，业务逻辑还没搞定，就触发超时释放锁
         这个释放是Redis层面的释放，并不是它调用了unlock
         也就是说，当这个线程执行完业务逻辑后，它还会调用unlock
         但此时它并不是锁的持有者，锁的持有者是其它线程
@@ -121,18 +132,28 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         解决方法：释放锁之前，获取锁标识并判断是否一致
 
         2.原子性问题：判断锁标识和自己的标识一致，准备去释放锁
-        但在即将去释放锁的路上，发生了阻塞（JVM）
+        但在即将去释放锁的路上，发生了阻塞（JVM Full GC）
         如果阻塞时间超过了我们规定的锁持有时间，那么又会出现问题一的情况
         因为这个即将释放锁的线程它已经判断过了，它以为锁还是自己的，所以它会直接释放
         其本质原因：判断锁标识与释放锁是两步动作
         解决方法：保证这两步操作的原子性
-        说到原子性，自然想到事务
         使用Lua脚本，在一个脚本中编写多条Redis命令，确保多条命令执行时的原子性
         因为Redis是单线程执行命令的，而Lua脚本在Redis中执行时，整个脚本会被当作一个单一的Redis命令来执行
         在Lua脚本执行期间，Redis不会插入执行其他任何命令
 
         3.但是现在又有新问题：
         （1）不可重入：同一个线程无法多次获取同一把锁
+        例：方法1和方法2都有获取锁的动作，方法1获取锁之后调用方法2，那么方法2获取锁必然失败
+        解决：获取锁和释放锁之前检查当前线程是否持有锁，维护一个计数器，记录重用次数
+        如何知道什么时候才要释放锁呢？当重用次数为0时，就代表一定走到了方法的最外层
+        可见，redis中的存储结构应该是key:lock，value:{field:thread1,value:0}这样的哈希结构
+        但是哈希结构是没有SET NX EX的
+        所以流程改为如下：开始时，判断锁是否存在，如果不存在，获取锁并添加线程标识，设置锁有效期，执行业务；
+        如果存在，判断锁标识是否是自己，如果不是就获取锁失败，如果是就将锁计数+1，设置锁有效期（因为锁在上一层方法中已经消耗了一定时间），执行业务；
+        释放前，判断锁是否是自己的，如果不是，不用管；如果是，将锁计数-1，判断锁计数是否为0
+        如果不是，就重置锁有效期，继续执行业务；如果是，就释放锁
+
+        这么多操作，显然必须要用Lua脚本来保证原子性
         （2）不可重试：获取锁只尝试一次就返回false，没有重试机制
         （3）超时释放：业务执行耗时较长也会导致锁释放
         （4）主从一致性

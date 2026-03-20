@@ -48,31 +48,4 @@ class HmDianPingApplicationTests {
         long end = System.currentTimeMillis();
         System.out.println("耗时：" + (end - begin));
     }
-
-    @Test
-    void testSaveShop() throws InterruptedException {
-        Shop shop = shopService.getById(1L);
-        //让它尽快过期
-        cacheClient.setWithLogicalExpire(CACHE_SHOP_KEY + 1L, shop, 10L, TimeUnit.SECONDS);
-    }
-
-    @Test
-    void testLongCache() {
-        Long a1 = 100L;
-        Long a2 = 100L;
-        System.out.println(a1 == a2);
-
-        Long b1 = 200L;
-        Long b2 = 200L;
-        System.out.println(b1 == b2);
-    }
-
-    @Test
-    void testStringCache() {
-        String s1 = new String("hello");  // 堆中创建新对象
-        String s2 = s1.intern();          // 将 "hello" 加入常量池
-        String s3 = "hello";              // 直接从常量池获取
-        System.out.println(s1 == s2);
-        System.out.println(s2 == s3);
-    }
 }
